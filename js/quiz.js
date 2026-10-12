@@ -1,0 +1,961 @@
+/* ===== 이름 맞추기 (난도: 쉬움/보통/어려움) =====
+ *
+ * 티니핑 도감의 이름 맞추기를 그대로 옮겼다 — 아이가 이미 익숙한 흐름이다.
+ * 쉬움은 선택지 셋 중에 고르고, 보통·어려움은 그림만 보고 맞힌다. 보통·어려움은 이름 칸을 눌러
+ * 정답을 보거나 맞는 이름을 말하면 열리고(말해서 맞히기 — 아래), 타이머를 켜면(기본은 꺼짐) 3초가
+ * 지나 정답이 저절로 열린다. 열리면 이름을 읽어 준다.
+ *
+ * 난도는 문제로 나오는 공룡으로도 가른다 — 쉬움·보통은 「유명한 공룡」(data 의 famous: 실린 위키 수로
+ * 앞 50종과 둘리사우루스)만, 어려움은 모든 공룡이다. 304종 가운데 대부분은 이름이 붙은 지 얼마 안 된
+ * 낯선 공룡이라, 아이가 아는 공룡으로 놀다가 다 알면 어려움으로 넓힌다.
+ * 티니핑 도감의 어려움은 실루엣이었는데, 공룡 도감에서는 실루엣을 뺐다.
+ *
+ * 난도별 도전수는 정답을 본 순간 한 번으로 세고(revealed), 난도 칸 오른쪽에 오늘·누적을 적는다 —
+ * 통계 서버가 켜져 있을 때만이다(js/stats.js). 티니핑 도감과 같다.
+ */
+const MODES = {
+  easy:   { choices: true, pool: "famous" },
+  normal: { choices: false, pool: "famous" },
+  hard:   { choices: false, pool: "all" },
+};
+
+const el = {
+  diffScreen: document.getElementById("difficultyScreen"),
+  stage: document.getElementById("stage"),
+  image: document.getElementById("quizImage"),
+  answer: document.getElementById("answerArea"),
+  next: document.getElementById("nextBtn"),
+  modeBar: document.getElementById("modeBar"),
+};
+
+let mode = null;
+let current = null;
+
+/* 문제로 나오는 공룡 — 난도의 pool 이 가리킨다 */
+const POOLS = {
+  famous: getAll().filter((d) => d.famous),
+  all: getAll(),
+};
+/* 문제 순서는 무리마다 페이지를 열 때 한 번 섞고 다 낼 때까지 이어 쓴다 — 난도를 바꿔도 그 무리를
+   이어 쓰므로(쉬움과 보통은 같은 무리) 방금 본 것이 금방 또 나오지 않는다. 다 내면 다시 섞는다. */
+const queues = { famous: shuffle(POOLS.famous), all: shuffle(POOLS.all) };
+function nextFrom(key) {
+  if (!queues[key].length) queues[key] = shuffle(POOLS[key]);
+  return queues[key].pop();
+}
+function upNext(key) {
+  return queues[key][queues[key].length - 1];
+}
+
+/* 다음 문제의 그림을 미리 받아 둔다. 카운트다운이 그림을 기다리므로, 그림이 늦게 오면
+   그만큼 빈 화면이 된다. 지금 문제를 푸는 동안 받아 두면 다음 그림은 캐시에서 바로 뜬다.
+   주소는 imageMarkup 이 쓰는 것과 같아야 캐시가 맞는다(js/util.js 의 imageSrc). 받아 둔
+   객체는 잡고 있는다 — 놓으면 사파리가 쓰기도 전에 버릴 수 있다. */
+const preloaded = {};
+function preloadImage(key, d) {
+  if (!d) return;
+  const img = new Image();
+  img.src = imageSrc(d, 520);
+  preloaded[key] = img;           // 무리마다 다음 그림 하나씩 — 난도를 오가도 서로 지우지 않게
+}
+
+function shuffle(arr) {
+  const a = arr.slice();
+  for (let i = a.length - 1; i > 0; i--) {
+    const j = Math.floor(Math.random() * (i + 1));
+    [a[i], a[j]] = [a[j], a[i]];
+  }
+  return a;
+}
+
+/* 문제 화면 맨 위에 고른 난도를 보여 준다. 난도 화면의 그 칸을 **그대로 복제해** 쓴다 —
+   방금 무엇을 골랐는지가 한눈에 이어진다. 복제본을 누르면 난도 화면으로 돌아간다.
+   data-mode 는 떼어 낸다 — 난도를 고르는 클릭은 난도 화면의 칸에만 걸려 있다. */
+function drawModeCard() {
+  const src = el.diffScreen.querySelector(`.diff-card[data-mode="${mode}"]`);
+  if (!src) return;
+  const copy = src.cloneNode(true);
+  copy.classList.remove("moving");
+  copy.removeAttribute("data-mode");
+  copy.setAttribute("aria-label", "난도 바꾸기");
+  copy.title = "난도 바꾸기";
+  el.modeBar.replaceChildren(copy);
+}
+
+let stageGen = 0;   // 문제 화면에 들어온 횟수 — 허락을 기다리는 사이 나갔다 오면 옛 시작은 무효
+
+function startMode(m) {
+  mode = m;
+  wakeAudio();             // 누른 흐름 안에서 — 사파리는 그래야 뒤에 시간으로 내는 비프를 들려준다
+  primeSpeech();           // 음성 합성기도 — iOS 는 첫 발화가 누른 흐름 안이어야 3초 뒤 정답 읽기를 허용한다
+  if (MODES[m].choices) {
+    stopHearing();
+    // 쉬움: 선택지 이름을 읽어 줄지 먼저 묻는다 — 이번 방문에 한 번. 음성 합성이 없는 브라우저는
+    // 읽을 수 없으니 묻지 않는다.
+    if (readChoices === null && window.speechSynthesis) { openPop(speakNote); return; }
+    showStage();
+    nextQuestion();
+    return;
+  }
+  // 보통·어려움: 허락 창이 뜨기 전에 마이크 안내를 팝업으로 먼저 보여 준다 — 무엇을 허락하는지,
+  // 언제 꺼지는지. 이미 허락된 기기(브라우저가 알려 주는 경우)나 이번 방문에서 이미 답한 뒤에는
+  // 곧바로 간다. 마이크는 「좋아요」를 누른 그 흐름 안에서 켠다(사파리).
+  if (!micExplained && !micGranted && !mic.dead && recognitionClass()) { openPop(micNote); return; }
+  listenAndStart();
+}
+
+/* 보통·어려움의 시작 — 난도 화면에 머문 채 마이크를 켠다. 허락 창이 문제 위가 아니라 난도 화면
+   위에 뜨고, 허락이 정해지면(켜졌든 거부됐든) 그때 문제 화면으로 넘어가 첫 문제를 낸다 —
+   허락 창 뒤로 문제 모양이 비치지 않고, 창이 떠 있는 동안 3초가 새지도 않는다.
+   연달아 누르면 켜던 세션은 그대로 두고 넘어갈 곳만 바꾼다. */
+function listenAndStart() {
+  const gen = ++stageGen;
+  mic.onSettled = () => { if (gen !== stageGen) return; showStage(); nextQuestion(); };
+  if (mic.off) { settleMic(); return; }  // 손으로 꺼 두었다(「싫어요」·마이크 단추) — 켜지 않고 바로 간다
+  if (!mic.wanted) { mic.wanted = true; startHearing(MIC_WAIT_MS); }
+  else if (mic.settled) settleMic();     // 이미 켜져 있으면 바로 넘어간다
+}
+
+/* 안내 팝업 둘 — 마이크(보통·어려움, #micNote)와 선택지 읽어 주기(쉬움, #speakNote). 난도를 고르면
+   문제 화면으로 넘어가기 전에 난도 화면 위에 <dialog> 로 띄운다. showModal() 은 뒤를 가리고 초점을
+   팝업 안에 가두며 Esc 로 닫힌다. 바깥(가림막)을 누르거나 Esc 로 닫으면 아무것도 시작하지 않고
+   난도 화면에 남는다. 그때는 고른 것이 아니므로 다음에 그 난도를 고를 때 다시 묻고, 둘 중 하나를
+   고른 뒤에는 이번 방문 동안 다시 묻지 않는다. */
+function openPop(dlg) {
+  if (typeof dlg.showModal === "function") dlg.showModal();
+  else dlg.setAttribute("open", "");   // <dialog> 를 모르는 옛 브라우저 — 가림막 없이 뜬다
+  // 초점은 단추가 아니라 팝업 자체에 둔다. 첫 단추에 두면 사파리가 파란 초점 링을 그려
+  // 「좋아요」가 미리 골라진 것처럼 보였다.
+  dlg.focus({ preventScroll: true });
+}
+function closePop(dlg) {
+  if (typeof dlg.close === "function") dlg.close();
+  else dlg.removeAttribute("open");
+}
+
+/* 마이크 안내 — 「좋아요」는 그 흐름에서 마이크를 켜고(사파리는 누른 흐름 안에서만 허락을 묻는다),
+   「싫어요」는 마이크를 끈 채로 바로 문제로 간다 — 허락 창이 뜨지 않고, 마이크 단추는 회색으로
+   남아 누르면 그때 켠다(아직 묻지 않았으니 허락 창이 뜬다). */
+let micExplained = false;   // 이번 방문에서 안내에 답했다
+let micGranted = false;     // 브라우저가 마이크가 이미 허락됐다고 알려 줬다 (Permissions API)
+const micNote = document.getElementById("micNote");
+document.getElementById("micOk").addEventListener("click", () => {
+  micExplained = true;
+  closePop(micNote);
+  wakeAudio();               // 이 흐름에서도 깨워 둔다 — 안내를 읽는 동안 세워졌을 수 있다
+  listenAndStart();
+});
+document.getElementById("micSkip").addEventListener("click", () => {
+  micExplained = true;
+  closePop(micNote);
+  // 끈 채로 간다 — 허락 창도 뜨지 않는다. 접는 것(giveUpMic)과 달리 단추는 남긴다: 브라우저는
+  // 아직 마이크를 묻지 않았으므로, 나중에 단추를 누르면 그때 허락 창이 뜨고 켜진다.
+  mic.off = true;
+  mic.wanted = false;
+  showStage();
+  nextQuestion();
+});
+
+/* 「좋아요」면 문제가 나올 때마다 선택지 셋을 차례로 읽어 주고(renderChoices), 「싫어요」면
+   읽지 않는다 — 이름 옆 스피커 버튼으로는 언제든 들을 수 있다. 「좋아요」를 누른 흐름에서
+   곧바로 첫 문제를 내므로, 이어 읽기가 그 흐름 안에서 엔진을 깨운다(iOS). */
+let readChoices = null;     // 이번 방문의 답 — null 이면 아직 묻지 않았다
+const speakNote = document.getElementById("speakNote");
+function answerSpeakNote(yes) {
+  readChoices = yes;
+  closePop(speakNote);
+  showStage();
+  nextQuestion();
+}
+document.getElementById("speakOk").addEventListener("click", () => answerSpeakNote(true));
+document.getElementById("speakSkip").addEventListener("click", () => answerSpeakNote(false));
+// 바깥(가림막)을 누르면 닫는다. 내용(.pop-body)이 팝업을 빈틈없이 덮으므로, 팝업 자체가
+// 눌렸다면 그것은 가림막이다.
+[micNote, speakNote].forEach((dlg) => {
+  dlg.addEventListener("click", (e) => { if (e.target === dlg) closePop(dlg); });
+});
+/* 이미 허락된 기기인지 미리 물어 둔다 — 그러면 안내를 건너뛴다. 사파리는 이 이름을 모를 수
+   있는데(throw 나 reject), 그러면 모른다고 보고 안내를 보인다. */
+if (navigator.permissions && navigator.permissions.query) {
+  try {
+    navigator.permissions.query({ name: "microphone" })
+      .then((st) => {
+        micGranted = st.state === "granted";
+        st.onchange = () => { micGranted = st.state === "granted"; };
+      })
+      .catch(() => { /* 이름을 모르는 브라우저 */ });
+  } catch { /* 위와 같다 */ }
+}
+
+/* 문제 화면으로 넘어간다. 고른 난도 칸이 제자리에서 맨 위(난도 표시줄)로 미끄러져 올라가고,
+   문제 칸은 그 아래로 살짝 떠오르며 나타난다 — 무엇을 골랐는지가 눈으로 이어진다. */
+function showStage() {
+  const src = el.diffScreen.hidden ? null : el.diffScreen.querySelector(`.diff-card[data-mode="${mode}"]`);
+  const from = src ? src.getBoundingClientRect() : null;
+  drawModeCard();
+  el.diffScreen.hidden = true;
+  el.stage.hidden = false;
+  const moved = moveCard(el.modeBar.firstElementChild, from);
+  const faded = fadeIn(el.stage.querySelector(".quiz-stage"), true);
+  if (moved || faded) transitionEnd = performance.now() + MOVE_MS;
+}
+
+/* 난도 화면에서 넘어오는 전환이 끝나는 때. 문제는 그 뒤에 시작한다 — 칸이 올라가는 사이
+   막대가 줄고 삐가 나면 쫓기듯 보였다. 끝 알림 대신 시간으로 잰다 — 알림은 탭이 보일 때 온다. */
+let transitionEnd = 0;
+function afterTransition(fn) {
+  const wait = transitionEnd - performance.now();
+  if (wait <= 0) fn(); else setTimeout(fn, wait);
+}
+
+/* 난도 칸을 옮기는 움직임 — 새 자리에 먼저 놓고 옛 자리만큼 되돌려 둔 데서 풀어 준다(FLIP).
+   옮기는 동안은 올린 효과와 그 전환을 끈다(.moving) — 칸이 손가락 밑을 지나며 올린 상태가
+   되면 그 전환이 움직임을 덮어 칸이 한 번에 튀었다. 움직임을 줄여 달라고 한 기기에서는 옮기지 않는다. */
+const MOVE_MS = 320;
+function reduceMotion() {
+  return !!(window.matchMedia && window.matchMedia("(prefers-reduced-motion: reduce)").matches);
+}
+function moveCard(card, from) {
+  if (!card || !from || reduceMotion() || typeof card.animate !== "function") return false;
+  const to = card.getBoundingClientRect();
+  const dx = from.left - to.left;
+  const dy = from.top - to.top;
+  if (Math.abs(dx) < 1 && Math.abs(dy) < 1) return false;
+  card.classList.add("moving");
+  const a = card.animate(
+    [{ transform: `translate(${dx}px, ${dy}px)` }, { transform: "translate(0, 0)" }],
+    { duration: MOVE_MS, easing: "cubic-bezier(.2, .8, .2, 1)" });
+  // 끝 알림은 화면이 보일 때 오므로 시간으로도 표시를 뗀다. 그사이 새 움직임이 시작됐으면
+  // 그쪽 것은 두고 간다(token).
+  const token = (card.moveToken || 0) + 1;
+  card.moveToken = token;
+  const done = () => { if (card.moveToken === token) card.classList.remove("moving"); };
+  a.onfinish = done;
+  a.oncancel = done;
+  setTimeout(done, MOVE_MS + 150);
+  return true;
+}
+function fadeIn(node, lift) {
+  if (!node || reduceMotion() || typeof node.animate !== "function") return false;
+  node.animate(
+    [{ opacity: 0, transform: lift ? "translateY(12px)" : "none" }, { opacity: 1, transform: "none" }],
+    { duration: MOVE_MS, easing: "ease-out" });
+  return true;
+}
+
+/* 난도 화면으로 돌아간다 — 맨 위의 난도 칸이 제자리로 미끄러져 내려가고 나머지 칸은 서서히
+   나타난다. 카운트다운 도중이면 끊는다 — 두면 숨은 화면 뒤에서 3초 뒤에 정답이 열린다.
+   마이크와 읽던 이름도 화면과 함께 접는다. */
+function backToDifficulty() {
+  const card = el.stage.hidden ? null : el.modeBar.firstElementChild;
+  const from = card ? card.getBoundingClientRect() : null;
+  stageGen++;
+  cancelCountdown();
+  stopHearing();
+  stopSpeaking();
+  el.stage.hidden = true;
+  el.diffScreen.hidden = false;
+  const dst = el.diffScreen.querySelector(`.diff-card[data-mode="${mode}"]`);
+  moveCard(dst, from);
+  el.diffScreen.querySelectorAll(".diff-card").forEach((c) => { if (c !== dst) fadeIn(c); });
+}
+
+/* 「다음 공룡」은 정답을 본 뒤에야 열린다 — 답을 보기 전에 넘길 수 있으면 문제를 본 줄
+   모르고 지나간다. */
+function lockNext(locked) { el.next.disabled = locked; }
+
+/* 정답이 나온 순간 — 「다음 공룡」을 열고, 도전 한 번을 센다(js/stats.js 가 받아 보낸다).
+   문제가 뜬 때가 아니라 답을 본 때 세는 이유: 스쳐 지나간 문제는 푼 것이 아니다.
+   난도를 고르자마자 되돌아 나오면 한 번도 세지 않는다. */
+function revealed() {
+  lockNext(false);
+  document.dispatchEvent(new CustomEvent("dino:quiz", { detail: { mode } }));
+}
+
+function nextQuestion() {
+  lockNext(true);
+  cancelCountdown();              // 새 문제가 뜨면 앞 문제의 카운트다운은 없는 것이다
+  stopSpeaking();                 // 앞 문제의 이름을 읽던 것도 — 새 문제의 소리와 겹치지 않게
+  const key = MODES[mode].pool;
+  if (!POOLS[key].length) {
+    el.image.innerHTML = "";
+    el.answer.innerHTML = `<div class="name-slot"><span class="hint">데이터가 아직 없어요</span></div>`;
+    return;
+  }
+  current = nextFrom(key);
+  preloadImage(key, upNext(key));   // 다음 문제의 그림은 이 문제를 푸는 동안 받아 둔다
+
+  // 그림 — 곧바로 받는다 (lazy 아님)
+  el.image.innerHTML = imageMarkup(current, 520, "", true);
+
+  MODES[mode].choices ? renderChoices() : renderNameSlot();
+}
+
+/* 정답이 공개되는 순간 나오는 '정답 행' — 그림·이름·태그. 행 전체가 개별 페이지로 가는
+ * 바로가기다. O/X 는 글자가 아니라 같은 틀(24×24)에 그린 도형이다 — 글자로 두면 글꼴마다
+ * O 는 넓게, X 는 좁게 나와 폭·높이가 달랐다. 동그라미는 가위표보다 작아 보여 한 치수 크다. */
+const MARK_SVG = {
+  correct: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3.5"' +
+    ' role="img" aria-label="맞혔어요"><circle cx="12" cy="12" r="8.25"/></svg>',
+  wrong: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3.5"' +
+    ' stroke-linecap="round" role="img" aria-label="틀렸어요"><path d="M4.75 4.75 19.25 19.25M19.25 4.75 4.75 19.25"/></svg>',
+};
+
+/* mark 는 "correct"(O) · "wrong"(X) · 없음. noThumb — 보통·어려움은 그림을 뺀다(큰 그림이
+   바로 위에 있다). 쉬움은 선택지 셋이 저마다 그림을 보여 줘야 하니 그대로 둔다. */
+function answerRowHTML(d, mark, noThumb) {
+  return `<div class="answer-row${mark ? " " + mark : ""}${noThumb ? " no-thumb" : ""}">
+    <a class="answer-hit" href="${dinoHref(d.id)}" aria-label="${d.nameKo} 자세히 보기"></a>
+    ${noThumb ? "" : `<span class="answer-thumb">${imageMarkup(d, 120)}</span>`}
+    <span class="answer-body">
+      <span class="answer-name-row">
+        <span class="answer-name">${d.nameKo}</span>${speakBtnHTML(d.nameKo)}
+      </span>
+      <span class="answer-tags">${tagsHTML(d)}</span>
+    </span><span class="mark">${MARK_SVG[mark] || ""}</span>
+  </div>`;
+}
+
+/* 정답을 공개한 '그 손가락'이 곧바로 개별 페이지로 이어지지 않게 잠깐 잠가 둔다.
+   아이가 빠르게 두 번 누르면 원치 않게 넘어가 버린다. 링크를 늦게 살리는 일은 css 가 맡는다. */
+function armRows(box) {
+  setTimeout(() => {
+    box.querySelectorAll(".answer-row").forEach((r) => r.classList.add("armed"));
+  }, 350);
+}
+
+/* --- 보통/어려움: 이름 가리기 → 눌러서·말해서 정답, 또는 (타이머를 켜면) 3초 카운트다운 뒤 정답 ---
+ * 이름 칸 왼쪽 끝의 타이머 단추로 3초 카운트다운을 끄고 켠다(티니핑 도감과 같다). 기본은 꺼짐이다.
+ *   꺼짐: 세지 않는다. 막대가 연초록으로 가라앉아 멈추고 「눌러서 정답 보기」가 뜬다. 칸을 누르거나
+ *         맞는 이름을 말하면 정답이 열린다 — 아이가 제 빠르기로 생각하고 연다.
+ *   켜짐: 정답은 3초가 지나면 저절로 열린다. 문제마다 반드시 3초의 '생각하는 참'이 생기고, 그 뒤에는
+ *         손을 대지 않아도 답이 온다. 이름 칸이 그대로 막대다 — 초록이 왼쪽에서부터 3초 동안
+ *         빠져나가고(css 의 countdown-drain), 1초마다 비프음과 함께 남은 초가 3 → 2 → 1 로 뜬다.
+ *         그사이 맞는 이름이 들렸으면 3초에 O 와 딩동으로 알린다.
+ * 들린 말은 막대 한가운데에 뜬다 — 남은 초나 「눌러서 정답 보기」를 밀어낸다(아래 '말해서 맞히기').
+ * 막대의 길이는 여기서 animation-duration 으로 넣는다 — 3초라는 숫자를 COUNTDOWN_MS 한 곳에만 두려고. */
+const COUNTDOWN_MS = 3000;
+const TICK_MS = 1000;
+let countdownTimers = [];
+let countdownSeq = 0;             // 그림을 기다리는 사이에 문제가 바뀌었는지 가리는 표
+/* 3초 타이머를 켜 둘지 — 이름 칸 왼쪽 끝 단추로 끄고 켠다(toggleTimer). 기본은 꺼짐이고, 바꾸면
+   이번 방문 동안 다음 문제·다른 난도에도 이어진다. */
+let timerOn = false;
+let cur = null;                   // 지금 문제의 카운트다운 { seq, slot, started, run, tryStart }
+const TAP_HINT = "눌러서 정답 보기";
+
+function cancelCountdown() {
+  countdownSeq++;
+  countdownTimers.forEach(clearTimeout);
+  countdownTimers = [];
+}
+
+/* box 안의 그림이 화면에 나타난 뒤 fn 을 부른다. 이미 내려와 있으면(캐시) 곧바로.
+   못 내려와도(error) 기다리지 않는다 — 이름이라도 맞혀 볼 수 있게. */
+function whenImageShown(box, fn) {
+  const img = box.querySelector("img");
+  if (!img || img.complete) { fn(); return; }
+  let done = false;
+  const go = () => { if (!done) { done = true; fn(); } };
+  img.addEventListener("load", go, { once: true });
+  img.addEventListener("error", go, { once: true });
+}
+
+/* 이름 칸 마크업 — 막대, 칸 전체를 덮는 투명한 「정답 보기」 단추(타이머가 꺼져 있을 때만),
+   타이머 단추, 가운데 글자(들린 이름, 남은 초 또는 「눌러서 정답 보기」), 마이크 단추. 진행 표시(role)는
+   막대에 단다 — 칸에 달면 그 안의 단추가 보조 기술에 가려진다. */
+function slotHTML() {
+  const secs = COUNTDOWN_MS / 1000;
+  return `
+    <div class="name-slot${timerOn ? "" : " tap"}" id="nameSlot">
+      <span class="countdown-fill" role="progressbar" aria-label="정답까지 남은 시간"
+            aria-valuemin="0" aria-valuemax="${secs}" aria-valuenow="${secs}"
+            style="animation-duration: ${COUNTDOWN_MS}ms"></span>
+      <button type="button" class="slot-hit" aria-label="정답 보기"${timerOn ? " hidden" : ""}></button>
+      ${timerHTML()}<span class="heard${timerOn ? "" : " hint"}">${timerOn ? "" : TAP_HINT}</span>${micHTML()}
+    </div>`;
+}
+
+function renderNameSlot() {
+  el.answer.innerHTML = slotHTML();
+  const slot = document.getElementById("nameSlot");
+
+  wakeAudio();                    // 「다음 공룡」을 누른 흐름 안에서 깨워 둔다
+  // 이번 문제의 창. 세션은 문제 화면에 들어올 때 이미 켜져 있다 — 그새 저절로 끝나 있으면
+  // 이 흐름에서 다시 켠다 (iOS 는 흐름 밖의 start 를 막을 수 있다).
+  const h = { text: "", matched: false, over: false, base: mic.count, onSettled: null };
+  hearing = h;
+  if (mic.wanted && !mic.rec && !mic.dead) startHearing();
+
+  // 카운트다운은 타이머가 켜져 있을 때, 넷이 갖춰져야 시작한다 — 그림이 화면에 나타나고
+  // (whenImageShown), 마이크가 정해져 있고(첫 문제는 listenAndStart 가 이미 기다렸고, 다시 켜는 중이면
+  // 그것이 정해지고), 난도 칸이 올라가는 전환이 끝나고(afterTransition), 소리 컨텍스트가 실제로
+  // 돌고(whenAudioReady). 기다리는 동안 막대는 가득 찬 채 서 있다. 그사이 다음 문제로 가거나 나가면
+  // 무효다. 타이머 단추로 껐다 켜면 그 문제를 처음부터 다시 센다(toggleTimer).
+  const seq = countdownSeq;
+  let imageShown = false;
+  const c = { seq, slot, started: false, run: 0 };
+  cur = c;
+  c.tryStart = () => {
+    if (c.started || h.over || seq !== countdownSeq) return;   // 이미 시작했거나, 열렸거나, 나갔다
+    if (!timerOn || !imageShown) return;                       // 꺼져 있으면 세지 않는다 — 눌러서 본다
+    // 마이크는 켜려는 중일 때만 기다린다 — 접었거나(dead) 쓰지 않기로 했으면(wanted 아님) 기다릴 것이 없다.
+    if (!(mic.settled || mic.dead || !mic.wanted)) return;
+    c.started = true;
+    const run = ++c.run;              // 세기 전에 타이머를 끄면 이 시작은 무효다(haltCountdown)
+    const live = () => seq === countdownSeq && run === c.run && timerOn;
+    afterTransition(() => {
+      if (!live()) return;
+      whenAudioReady(() => { if (live()) startCountdown(slot); });
+    });
+  };
+  h.onSettled = c.tryStart;
+  whenImageShown(el.image, () => { imageShown = true; c.tryStart(); });
+}
+
+/* 소리 컨텍스트가 돌고 시계가 갈 때 fn 을 부른다. 사파리가 컨텍스트를 세워 두면 첫 비프가
+   깨어나는 만큼 늦어져 막대와 어긋난다. 1.5초 넘게 걸리면 그냥 간다 — 소리는 막대를 거드는
+   것이지 막대를 세우는 것이 아니다. */
+const AUDIO_WAIT_MS = 1500;
+function whenAudioReady(fn) {
+  const ctx = audioCtx;
+  if (!ctx) { fn(); return; }
+  const clock = ctx.currentTime;
+  let done = false;
+  const go = () => { if (!done) { done = true; fn(); } };
+  // 세워져 있으면 깨운다. 돌고 있다고 해도 시계가 서 있을 수 있다 — 아이폰은 마이크 녹음이
+  // 시작되는 순간 오디오 세션을 바꾸느라 상태는 running 인 채 렌더링만 1초쯤 멈춘다(티니핑 도감에서
+  // 잰 것). 그 위에 예약한 삐는 시계가 다시 갈 때 몰려 나므로, 시계가 실제로 가는 것을 보고 시작한다.
+  if (ctx.state !== "running") {
+    try { const p = ctx.resume(); if (p && p.catch) p.catch(() => {}); } catch { /* 한도에서 간다 */ }
+  }
+  const poll = () => {
+    if (done) return;
+    if (ctx.state === "running" && ctx.currentTime > clock + 0.02) { go(); return; }
+    setTimeout(poll, 50);
+  };
+  setTimeout(poll, 30);
+  setTimeout(go, AUDIO_WAIT_MS);
+}
+
+/* 3초 카운트다운 — 막대가 줄어들고, 1초마다 숫자와 비프, 3초에 판정과 정답.
+   소리는 컨텍스트의 출력 지연(outputLatency)만큼 늦게 스피커에 닿으므로, 그만큼 소리를 먼저
+   내고 화면은 그 뒤에 바꾼다 — 마이크가 켜지는 것과 같은 순간에 컨텍스트를 만드는 맥 사파리에서
+   160ms 였다(녹음용 오디오 장치에 붙어서). 40ms 아래는 보정하지 않는다 — 귀로 못 가르는 차이에
+   화면을 늦추면 삐가 숫자보다 앞서 보인다. 터무니없는 값은 0.4초에서 자른다. */
+function startCountdown(slot) {
+  const raw = Math.round(((audioCtx && audioCtx.outputLatency) || 0) * 1000);
+  const lat = raw < 40 ? 0 : Math.min(400, raw);
+  const ticks = Math.round(COUNTDOWN_MS / TICK_MS);
+  const bar = slot.querySelector(".countdown-fill");
+  const at = (fn, ms) => { if (ms <= 0) fn(); else countdownTimers.push(setTimeout(fn, ms)); };
+  const show = (i) => { bar.setAttribute("aria-valuenow", ticks - i); paintCount(ticks - i); };
+
+  at(() => { slot.classList.add("counting"); show(0); }, lat);   // 막대는 이때부터 줄어든다
+  beep(880, 110);                                                // 첫 소리는 그 자리에서
+  for (let i = 1; i < ticks; i++) {
+    at(() => beep(880, 110), i * TICK_MS);
+    at(() => show(i), lat + i * TICK_MS);
+  }
+  // 판정은 지금까지 들린 것으로 — 소리가 나는 때에 정하고, 화면은 같은 판정으로 연다.
+  // 맞혔으면 조금 높고 긴 띵 대신 딩동(chime). 듣기는 끄지 않는다 — 문제마다 켜고 끄면 iOS 가
+  // 그때마다 알림음을 낸다. 이 뒤에 들리는 것은 다음 문제가 시작될 때까지 버린다(hearing.over).
+  let hit = false;
+  at(() => {
+    hit = !!(hearing && hearing.matched);
+    if (hit) chime(); else beep(1320, 380);
+  }, COUNTDOWN_MS);
+  at(() => {
+    if (hearing) hearing.over = true;
+    revealName(hit ? "correct" : null);
+  }, lat + COUNTDOWN_MS);
+}
+
+/* 아직 들린 말이 없을 때는 남은 초를 막대 한가운데에 큰 숫자로 센다. 이름이 한 번 들리면 그 뒤로는
+   숫자를 그리지 않는다. 요소째 갈아 끼운다 — 새로 놓여야 튀는 애니메이션(css 의 count-pop)이 다시
+   돌아 소리와 같은 박자로 한 번씩 튄다. */
+function paintCount(n) {
+  if (hearing && hearing.text) return;
+  const old = el.answer.querySelector(".heard");
+  if (!old) return;
+  const fresh = document.createElement("span");
+  fresh.className = "heard num";
+  fresh.textContent = n;
+  old.replaceWith(fresh);
+}
+
+/* 이름 칸을 정답 행으로 갈아 끼우고 이름을 읽어 준다. mark 는 말해서 맞혔을 때의 "correct" 뿐이다 —
+   오른쪽 끝, 마이크가 있던 자리에 O 가 온다. 틀렸거나 말이 없으면 아무 표시도 없다(아래 '말해서 맞히기'). */
+function revealName(mark) {
+  el.answer.innerHTML = answerRowHTML(current, mark, true);   // 그림은 바로 위에 있다
+  armRows(el.answer);
+  lastReveal = { name: current.nameKo, at: performance.now() };   // 마이크에 되돌아 들리면 거른다(isEcho)
+  speakText(current.nameKo, el.answer.querySelector(".answer-row [data-speak]"));
+  revealed();
+}
+
+/* ===== 타이머 단추 =====
+   이름 칸 왼쪽 끝에서 마이크 단추와 마주 선다. 켜져 있으면 연초록이 차고 고리가 번지며(.on), 누르면
+   3초 타이머를 끄고 켠다(toggleTimer). 그림은 스톱워치 — 몸통·바늘·꼭지. 티니핑 도감의 것과 같다. */
+const TIMER_ICON =
+  '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2"' +
+  ' stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">' +
+  '<circle cx="12" cy="14" r="7"/><path d="M12 14v-3.5"/><path d="M9.5 3h5"/><path d="M12 3v4"/></svg>';
+function timerHTML() {
+  return `<button type="button" class="slot-timer${timerOn ? " on" : ""}" aria-pressed="${timerOn}"` +
+    ` aria-label="${timerOn ? "타이머 끄기" : "타이머 켜기"}" title="3초 타이머">${TIMER_ICON}</button>`;
+}
+/* 단추와 칸 모양을 타이머 상태에 맞춘다. 끄면 칸 전체가 「정답 보기」 단추가 되고(.tap · .slot-hit),
+   들린 말이 없으면 가운데에 「눌러서 정답 보기」를 적는다. 켜면 그 글을 거둔다 — 세기 시작하면 남은
+   초가 그 자리에 온다. */
+function paintTimer() {
+  const slot = el.answer.querySelector(".name-slot");
+  if (!slot) return;
+  const b = slot.querySelector(".slot-timer");
+  if (b) {
+    b.classList.toggle("on", timerOn);
+    b.setAttribute("aria-pressed", timerOn ? "true" : "false");
+    b.setAttribute("aria-label", timerOn ? "타이머 끄기" : "타이머 켜기");
+  }
+  slot.classList.toggle("tap", !timerOn);
+  const hit = slot.querySelector(".slot-hit");
+  if (hit) hit.hidden = timerOn;
+  const t = slot.querySelector(".heard");
+  if (t && !(hearing && hearing.text)) {
+    if (!timerOn) { t.className = "heard hint"; t.textContent = TAP_HINT; }
+    else if (t.classList.contains("hint")) { t.className = "heard"; t.textContent = ""; }
+  }
+}
+/* 타이머 단추를 누르면 — 켜져 있으면 끈다: 세던 것을 멈추고 막대를 다시 가득 채운다. 그사이 맞는
+   이름이 이미 들렸으면 그 자리에서 정답을 연다(꺼진 동안의 규칙). 꺼져 있으면 켠다: 그 문제를
+   처음부터 센다. 누른 흐름 안이라 소리도 여기서 깨운다. 정답이 이미 열렸으면 다음 문제부터다. */
+function toggleTimer() {
+  timerOn = !timerOn;
+  wakeAudio();
+  const c = cur;
+  const live = !!(c && c.seq === countdownSeq && c.slot.isConnected && hearing && !hearing.over);
+  if (live) {
+    if (timerOn) {
+      hearing.onSettled = c.tryStart;   // 마이크가 아직 정해지지 않았으면 정해질 때 다시 부른다
+      c.tryStart();
+    } else {
+      haltCountdown(c);
+    }
+  }
+  paintTimer();
+  if (live && !timerOn && hearing.matched) revealNow(true);
+}
+function haltCountdown(c) {
+  c.run++;                          // 아직 세기 전이던 시작도 무효
+  c.started = false;
+  countdownTimers.forEach(clearTimeout);
+  countdownTimers = [];
+  c.slot.classList.remove("counting");   // 막대가 다시 가득 찬다 — 다시 켜면 처음부터 줄어든다
+  const bar = c.slot.querySelector(".countdown-fill");
+  if (bar) bar.setAttribute("aria-valuenow", COUNTDOWN_MS / 1000);
+}
+/* 타이머가 꺼진 동안 정답을 연다 — 칸을 눌렀거나(hit 없음, 소리 없이 — 이름은 읽어 준다) 맞는 이름이
+   들렸을 때(hit, 딩동과 O). */
+function revealNow(hit) {
+  if (!hearing || hearing.over) return;
+  hearing.over = true;
+  if (hit) chime();
+  revealName(hit ? "correct" : null);
+}
+el.answer.addEventListener("click", (e) => {
+  if (e.target.closest(".slot-mic")) toggleMic();
+  else if (e.target.closest(".slot-timer")) toggleTimer();
+  else if (e.target.closest(".slot-hit")) revealNow(false);
+});
+
+/* ===== 말해서 맞히기 (보통·어려움) — 티니핑 도감에서 옮겼다 =====
+   문제 화면에 있는 동안 마이크가 켜져 있다. 아이가 이름을 말하면 들린 말을 막대 한가운데에
+   보여 준다(말하는 도중의 중간 결과도 바로 — 목록의 말해서 찾기와 같은 까닭). 맞는 이름이 들리면
+   타이머가 꺼져 있을 때는 그 자리에서, 켜져 있을 때는 3초에 정답을 열며 정답 행의 오른쪽 끝 —
+   마이크가 있던 자리 — 에 O 를 그리고 딩동이 난다. 맞혔을 때만이다. 틀렸거나 말이 없으면 아무
+   표시도 하지 않는다 — 낯선 이름은 인식기가 자주 어긋나서 맞게 말했는데 X 를 받는 일이 생기고,
+   말이 없었던 것은 틀린 것이 아니다.
+
+   들은 말은 js/hear.js 의 fixHeard 로 이름으로 고쳐 견준다 — 말해서 찾기가 쓰는 그 규칙이다(소리
+   열쇠, 앞머리·부분열 맞추기, 별명). 「티렉스」 라고 해도 티라노사우루스를 맞힌 것이다. 후보 셋 중
+   하나라도 정답이면 맞힌 것이고, 한 번 맞혔으면 그 뒤에 딴말을 해도 맞힌 것이다.
+
+   듣기는 문제가 아니라 문제 화면 단위다. 난도 칸을 누른 그 흐름 안에서 start() 를 불러야
+   사파리가 허락을 묻고 켜 주며, 허락이 정해지면 그때 첫 문제를 낸다(listenAndStart). 그 뒤로는
+   문제 사이에도 끄지 않는다 — iOS 는 인식기를 켜고 끌 때마다 알림음을 내는데, 문제마다 켜고 끄면
+   문제마다 두 번씩 울린다. 난도 화면으로 나가거나 화면을 떠날 때 끈다. 저절로 끝나면(긴 침묵·
+   세션 한도·네트워크) 다시 켠다 — 곧장 끝나기를 되풀이하면 세 번까지만. 다시 켤 때는 이미
+   허락된 뒤라 창은 뜨지 않고 알림음만 한 번 난다.
+
+   결과는 세션 내내 쌓이므로 문제마다 창을 낸다. 문제를 시작할 때 그때까지의 결과 수를 적어
+   두고(hearing.base) 그 뒤에 온 것만 이번 문제로 본다. 정답이 열린 뒤에 오는 것은 다음 문제가
+   시작될 때까지 버린다. 정답을 읽어 주는 우리 목소리는 대개 그 사이에 받아 적혀 그대로 버려지고,
+   「다음 공룡」을 아주 빨리 눌러 새 문제로 새어 든 것은 공개한 지 몇 초 안에 들린 그 이름을
+   무시하는 것으로 거른다(isEcho).
+
+   첫 문제는 마이크가 정해진 뒤에 낸다 — 실제로 녹음이 시작됐거나(audiostart), 못 켜졌거나(거부·
+   오류·인식 없음). 그때까지는 난도 화면에 머문다. 신호가 없는 브라우저가 있을까 봐 30초에는 그냥
+   낸다(MIC_WAIT_MS). 문제 도중에 다시 켜는 중이면 2초까지만 기다린다(MIC_RESTART_WAIT_MS).
+   마이크 표시가 번지는 것도 실제로 켜진 뒤부터다.
+
+   인식이 없는 브라우저(파이어폭스 등)나 허락을 받지 못한 기기에서는 마이크 표시를 내지 않는다 —
+   한 번 거부하면 단추를 눌러도 브라우저가 허락 창을 다시 띄워 주지 않으므로 남겨 둘 까닭이 없다.
+   인식기 클래스는 부를 때마다 window 에서 찾는다 — 시험할 때 가짜를 끼워 넣기 쉽게. */
+const MIC_WAIT_MS = 30000;          // 처음 켤 때(허락 창) 기다리는 한도 — 신호가 없는 브라우저용 안전망
+const MIC_RESTART_WAIT_MS = 2000;   // 문제 도중에 다시 켤 때 기다리는 한도
+const ECHO_MS = 4000;               // 공개한 정답이 되돌아 들리는 것으로 보는 시간
+const mic = {
+  rec: null,          // 지금 듣고 있는 인식기
+  wanted: false,      // 문제 화면에 있어 켜 두어야 하는가
+  listening: false,   // 실제로 듣는 중인가 (start 뒤)
+  settled: false,     // 켜졌든 못 켜졌든 정해졌는가
+  dead: false,        // 허락을 못 받았거나 시작이 안 되면 이번 방문에서는 접는다 (단추도 거둔다)
+  off: false,         // 손으로 꺼 두었다(「싫어요」·마이크 단추) — 단추를 누를 때까지 스스로 켜지 않는다
+  count: 0,           // 이번 세션에서 지금까지 쌓인 결과 수
+  restarts: 0,
+  startedAt: 0,
+  capTimer: null,
+  onSettled: null,    // 정해지면 한 번 부를 것 (첫 문제 내기)
+};
+let hearing = null;      // 이번 문제에 들린 것 { text, matched, over, base, onSettled }
+let lastReveal = null;   // 마지막으로 읽어 준 정답 { name, at }
+
+const recognitionClass = () => window.SpeechRecognition || window.webkitSpeechRecognition;
+
+/* 검색창의 마이크(index.html)와 같은 그림 */
+const MIC_ICON =
+  '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"' +
+  ' stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">' +
+  '<rect x="9" y="2.5" width="6" height="11" rx="3" fill="currentColor" stroke="none"/>' +
+  '<path d="M5.5 11a6.5 6.5 0 0 0 13 0"/><line x1="12" y1="17.5" x2="12" y2="21"/></svg>';
+
+/* 마이크 단추. 켜져 있으면 번지고(listening), 누르면 끄고 켠다(toggleMic). */
+function micHTML() {
+  if (mic.dead || !recognitionClass()) return "";
+  return `<button type="button" class="slot-mic${mic.listening ? " listening" : ""}"` +
+    ` aria-pressed="${mic.listening}" aria-label="${mic.listening ? "말해서 맞히기 끄기" : "말해서 맞히기 켜기"}"` +
+    ` title="말해서 맞히기">${MIC_ICON}</button>`;
+}
+function paintMic(on) {
+  mic.listening = on;
+  const m = el.answer.querySelector(".slot-mic");
+  if (!m) return;
+  m.classList.toggle("listening", on);
+  m.setAttribute("aria-pressed", on ? "true" : "false");
+  m.setAttribute("aria-label", on ? "말해서 맞히기 끄기" : "말해서 맞히기 켜기");
+}
+/* 마이크 단추를 누르면 — 켜져 있으면 끈다: 다음 문제·다른 난도·뒤로 가기로 돌아왔을 때도 스스로
+   켜지 않고(off), 다시 누르면 켠다. 꺼져 있으면 켠다 — 「싫어요」로 시작했다면 브라우저가 처음 묻는
+   것이라 여기서 허락 창이 뜨고, 다른 페이지에 다녀와 꺼진 채 되살아났는데 스스로 못 켰을 때도 이
+   길로 켠다. 누른 흐름 안이라 iOS 도 켜 준다. */
+function toggleMic() {
+  if (mic.dead) return;
+  // 끄는 것도 정해진 것이다 — 다시 켜던 중에 끄면 그 마이크를 기다리던 카운트다운을 풀어 준다.
+  if (mic.rec) { stopHearing(); mic.off = true; settleMic(); return; }
+  // 켠다. 거부하면 오류 처리가 단추를 거둔다(giveUpMic). 손으로 켠 것이니 다시 켜기 횟수도 새로 센다.
+  mic.off = false;
+  mic.wanted = true;
+  mic.restarts = 0;
+  startHearing();
+}
+
+/* 들린 이름을 막대 한가운데에. 남은 초를 세던 숫자나 「눌러서 정답 보기」가 있었다면 밀어낸다. */
+function paintHeard(text) {
+  const h = el.answer.querySelector(".heard");
+  if (!h) return;
+  h.textContent = text;
+  h.classList.remove("num", "hint");
+}
+/* 이번 방문에서는 마이크를 접는다 — 표시도 그 자리에서 거둔다. 한 번 거부하면 단추를
+   눌러도 브라우저가 허락 창을 다시 띄워 주지 않으므로, 남겨 두어도 누를 일이 없다. */
+function giveUpMic() {
+  mic.dead = true;
+  // 접었으면 더 기다릴 것이 없다 — 정해진 것으로 친다. 카운트다운이 오지 않을 마이크를
+  // 기다리며 시작하지 않는 일이 없게 한다.
+  mic.settled = true;
+  const m = el.answer.querySelector(".slot-mic");
+  if (m) m.remove();
+}
+/* 마이크가 정해졌다 — 켜졌든 못 켜졌든. 기다리던 것(첫 문제 내기 · 카운트다운)을 풀어 준다. */
+function settleMic() {
+  // 이미 정해진 뒤에 또 불려도 된다 — 기다리던 것은 한 번 부르고 떼어 내므로 두 번 가지 않는다.
+  mic.settled = true;
+  clearTimeout(mic.capTimer);
+  mic.capTimer = null;
+  // 부르기 전에 둘 다 떼어 둔다 — 첫 문제 내기(first)가 새 문제의 훅을 달아 두는데,
+  // 그것까지 여기서 부르면 카운트다운이 두 번 시작된다. 새 문제의 훅은 그림이 뜰 때 불린다.
+  const first = mic.onSettled;
+  mic.onSettled = null;
+  const go = hearing ? hearing.onSettled : null;
+  if (hearing) hearing.onSettled = null;
+  if (first) first();
+  if (go) go();
+}
+/* 방금 읽어 준 정답이 인식기에 되돌아 들린 것인가 */
+function isEcho(name) {
+  return !!lastReveal && performance.now() - lastReveal.at < ECHO_MS && sameName(name, lastReveal.name);
+}
+
+/* 문제 화면에 들어올 때 켠다(누른 흐름 안에서). 저절로 끝났을 때는 onend 가 다시 부르고,
+   그래도 안 켜져 있으면 다음 문제를 누를 때(renderNameSlot) 그 흐름에서 또 켠다.
+   soft — 누른 흐름 밖에서 켜 보는 것(되살아날 때). iOS 가 막으면 거부처럼 보이지만
+   '허락 안 함'이 아니므로 접지 않고 꺼 둔다. 다음 문제나 마이크 단추를 누를 때 흐름 안에서 켠다. */
+function startHearing(waitMs, soft) {
+  if (!mic.wanted) return;
+  const R = recognitionClass();
+  if (!R || mic.dead) { settleMic(); return; }   // 기다릴 것이 없다
+  if (mic.rec) return;
+  mic.settled = false;
+  clearTimeout(mic.capTimer);
+  mic.capTimer = setTimeout(settleMic, waitMs || MIC_RESTART_WAIT_MS);
+
+  const r = new R();
+  r.soft = !!soft;
+  r.everStarted = false;
+  r.lang = "ko-KR";
+  r.interimResults = true;
+  r.continuous = true;            // 문제 사이에도 끊기지 않게
+  r.maxAlternatives = 3;          // 첫 후보가 어긋나도 뒤 후보가 이름으로 풀리는 일이 잦다
+
+  // 실제로 녹음이 시작됐다 — 허락 창이 모두 닫힌 뒤다. start 가 아니라 audiostart 를 기다린다:
+  // iOS 는 start 를 보낸 뒤에 시스템의 음성 인식 허락 창을 한 번 더 띄우고, 녹음은 그 창이
+  // 닫힌 뒤에야 시작한다. start 에서 문제를 내면 허락 창 뒤에서 문제가 먼저 떠 있었다.
+  r.onaudiostart = () => {
+    if (mic.rec !== r) return;
+    r.everStarted = true;
+    mic.startedAt = performance.now();
+    paintMic(true);
+    settleMic();
+  };
+  r.onresult = (e) => {
+    if (mic.rec !== r) return;
+    mic.count = e.results.length;
+    if (!hearing || hearing.over) return;
+    // 이번 문제의 창(base 뒤)만 훑는다. 앞선 결과는 굳은 것이고 마지막 결과는 아직 바뀌는
+    // 중일 수 있는데, 어느 쪽이든 정답이 들렸으면 들린 것이다. 보여 줄 말은 뒤에 말한 것이
+    // 앞에 말한 것을 덮되, 이름으로 풀리는 후보를 앞세운다.
+    let shown = "";
+    for (let i = hearing.base; i < e.results.length; i++) {
+      const res = e.results[i];
+      let pick = "";
+      for (let j = 0; j < res.length; j++) {
+        const guess = fixHeard(cleanHeard(res[j].transcript));
+        if (!guess) continue;
+        if (isEcho(guess)) { pick = ""; break; }   // 방금 읽어 준 정답이 되돌아온 것
+        if (sameName(guess, current.nameKo)) { hearing.matched = true; pick = current.nameKo; break; }
+        if (!pick || (NAMES.has(guess) && !NAMES.has(pick))) pick = guess;
+      }
+      if (pick) shown = pick;
+    }
+    if (hearing.matched) shown = current.nameKo;   // 한 번 맞혔으면 그 이름을 그대로 보여 준다
+    if (!shown) return;                            // 들린 것이 비면 보이던 것(숫자)을 그대로 둔다
+    hearing.text = shown;
+    paintHeard(shown);
+    // 타이머가 꺼져 있으면 기다릴 3초가 없다 — 맞는 이름이 들리면 그 자리에서 연다
+    if (hearing.matched && !timerOn) revealNow(true);
+  };
+  r.onerror = (e) => {
+    if (mic.rec !== r) return;
+    if (e.error === "not-allowed" || e.error === "service-not-allowed" || e.error === "audio-capture") {
+      if (!r.soft) {              // 흐름 밖에서 켜 본 것이면 막힌 것일 뿐이라 접지 않는다
+        giveUpMic();
+        showToast("마이크를 쓸 수 없어요 🥲");
+      }
+    }
+    settleMic();                  // 거부도 '정해진 것'이다 — 첫 문제를 더 기다리게 하지 않는다
+    // no-speech·aborted·network 는 곧이어 오는 onend 가 이어서 맡는다
+  };
+  r.onend = () => {
+    if (mic.rec !== r) return;    // 이미 끊고 새것으로 넘어갔다
+    mic.rec = null;
+    paintMic(false);
+    settleMic();                  // 켜 보지도 못하고 끝났어도 정해진 것이다
+    if (!mic.wanted || mic.dead) return;
+    if (r.soft && !r.everStarted) return;   // 흐름 밖에서 켜 보다 막힌 것 — 누를 때까지 꺼 둔다
+    // 한참 듣다가 끝난 것이면 되풀이가 아니다 — 켠 횟수를 처음부터 센다
+    if (performance.now() - mic.startedAt > 5000) mic.restarts = 0;
+    if (mic.restarts < 3) { mic.restarts++; startHearing(); }
+  };
+
+  mic.rec = r;
+  mic.count = 0;                    // 새 세션의 결과는 0 부터 쌓인다
+  if (hearing) hearing.base = 0;    // 이번 문제의 창도 거기서부터
+  try {
+    r.start();
+  } catch {
+    mic.rec = null;
+    giveUpMic();                  // 시작부터 안 되면 이번 방문에서는 접는다
+    settleMic();
+  }
+  // 표시는 아직 켜지 않는다 — 실제로 녹음이 시작되면(onaudiostart) 켠다
+}
+
+/* 문제 화면을 떠날 때 끈다 — 난도 화면으로 나가기, 화면 떠나기, 쉬움으로 가기.
+   처리기를 먼저 떼어 낸다 — 뒤늦은 onend 가 새 세션을 끄거나 다시 켜면 안 된다. */
+function stopHearing() {
+  mic.wanted = false;
+  mic.onSettled = null;
+  clearTimeout(mic.capTimer);
+  mic.capTimer = null;
+  const r = mic.rec;
+  mic.rec = null;
+  if (r) {
+    r.onstart = r.onaudiostart = r.onresult = r.onerror = r.onend = null;
+    try { r.abort(); } catch { /* 이미 끝난 인식기면 던질 수 있다 */ }
+  }
+  paintMic(false);
+}
+window.addEventListener("pagehide", stopHearing);   // 다른 페이지로 가면 끈다 — 목록의 말해서 찾기와 같은 까닭
+/* 다른 페이지에 다녀와 되살아나면(bfcache) 마이크는 떠날 때 꺼 둔 채다. 문제 화면이면 다시
+   켜 본다 — iOS 는 누른 흐름 밖에서 켜는 것을 막을 수 있는데, 그러면 꺼진 채로 두고 다음
+   문제를 누를 때나 마이크 단추로 켠다(soft). 그때의 거부는 '허락 안 함'이 아니라 접지 않는다. */
+window.addEventListener("pageshow", (e) => {
+  if (!e.persisted || el.stage.hidden || !mode || MODES[mode].choices || mic.dead || mic.off) return;
+  mic.wanted = true;
+  startHearing(MIC_RESTART_WAIT_MS, true);
+});
+
+/* ===== 비프음 =====
+   소리 파일 없이 Web Audio 의 발진기로 낸다. 사인파라 아이 귀에 둥글고, 10ms 만에 켜서
+   꼬리로 스러지게 하여 딸깍 소리가 나지 않는다.
+   사파리(특히 아이폰)는 누른 흐름 안에서 만들거나 resume() 한 AudioContext 만 소리를 낸다.
+   문제는 늘 누른 데서 시작하므로(난도 칸 · 「다음 공룡」) 그 흐름 안에서 wakeAudio() 를 부른다.
+   소리가 안 나는 기기에서도 막대는 그대로 간다 — 소리는 막대를 거드는 것이지 대신하지 않는다. */
+let audioCtx = null;
+
+function wakeAudio() {
+  const AC = window.AudioContext || window.webkitAudioContext;
+  if (!AC) return;
+  try {
+    if (!audioCtx) audioCtx = new AC();
+    if (audioCtx.state !== "running") audioCtx.resume();
+  } catch { audioCtx = null; }    // 못 깨우면 이번에는 소리 없이 간다
+}
+
+function beep(freq, ms) { tone(freq, 0, ms / 1000); }
+
+/* 맞혔을 때의 긍정음 — 두 음이 올라가는 '딩동'(C6 → E6). 쉬움에서는 정답을 고른 순간, 보통·어려움에서는
+   맞는 이름이 들렸을 때 난다(타이머가 꺼져 있으면 들린 그 자리에서, 켜져 있으면 3초 끝의 띵 대신). */
+function chime() {
+  tone(1047, 0, 0.16);
+  tone(1319, 0.14, 0.42);
+}
+
+function tone(freq, offset, dur) {
+  const ctx = audioCtx;
+  if (!ctx) return;
+  try {
+    if (ctx.state !== "running") {
+      // 세워진 컨텍스트에 예약하면 깨어나는 순간 뒤늦게 난다 — 막대와 어긋난 삐는 없는 것이
+      // 낫다. 이번 소리는 건너뛰고 깨우기만 한다.
+      const p = ctx.resume();
+      if (p && p.catch) p.catch(() => {});
+      return;
+    }
+    const t = ctx.currentTime + offset;
+    const osc = ctx.createOscillator();
+    const vol = ctx.createGain();
+    osc.type = "sine";
+    osc.frequency.value = freq;
+    vol.gain.setValueAtTime(0.0001, t);
+    vol.gain.exponentialRampToValueAtTime(0.3, t + 0.01);
+    vol.gain.exponentialRampToValueAtTime(0.0001, t + dur);
+    osc.connect(vol);
+    vol.connect(ctx.destination);
+    osc.start(t);
+    osc.stop(t + dur + 0.02);
+  } catch { /* 소리는 거드는 것뿐 — 못 내도 카운트다운은 간다 */ }
+}
+
+/* --- 쉬움: 3지선다 ---
+ * 선택지는 <button> 이 아니라 role="button" 인 <div> 다 — 버튼 안에 버튼(읽어 주기)을 넣으면
+ * 파서가 안쪽 버튼을 바깥으로 밀어내 마크업이 깨진다.
+ * 읽어 주기 버튼은 세 선택지 모두에 처음부터 붙는다. 글을 못 읽는 아이에게는 선택지를
+ * 들어 보는 것이 곧 문제를 읽는 것이라, 답을 알려 주는 것이 아니다. */
+function renderChoices() {
+  // 오답 선택지도 같은 무리(유명한 공룡)에서 고른다 — 낯선 이름 둘 사이에서 아는 이름을 고르는 것은
+  // 알아서 맞힌 것이 아니라 지워서 맞힌 것이다.
+  const others = shuffle(POOLS[MODES[mode].pool].filter((d) => d.id !== current.id)).slice(0, 2);
+  const options = shuffle([current, ...others]);
+  el.answer.innerHTML = `<div class="choices">${
+    options.map((o) =>
+      `<div class="choice-btn" role="button" tabindex="0" data-id="${o.id}">` +
+      `<span class="choice-name">${o.nameKo}</span>${speakBtnHTML(o.nameKo)}</div>`).join("")
+  }</div>`;
+
+  const btns = [...el.answer.querySelectorAll(".choice-btn")];
+
+  // 선택지 셋을 텀을 두고 차례로 읽어 준다. 읽는 동안에는 그 선택지의 버튼이 펄스로 뛰어,
+  // 지금 어느 이름을 읽는지 눈으로도 따라갈 수 있다. 「좋아요」라고 한 경우에만이다.
+  if (readChoices) {
+    speakSeries(btns.map((b) => ({
+      text: b.querySelector(".choice-name").textContent,
+      btn: b.querySelector("[data-speak]"),
+    })));
+  }
+  let settled = false;
+
+  const pick = (btn, e) => {
+    if (e && e.target.closest("[data-speak]")) return;   // 안쪽 읽어 주기 버튼
+    if (settled) return;
+    settled = true;
+    const chosenId = btn.dataset.id;
+    if (chosenId === current.id) { wakeAudio(); chime(); }
+    // 선택지 셋을 제자리에서 정답 행으로 갈아 끼운다 — 나머지 둘도 결국 공룡이고, 아이는
+    // 방금 들어 본 이름의 그림을 궁금해한다. 고르지 않은 오답에는 표시를 하지 않는다.
+    el.answer.innerHTML = `<div class="choices">${
+      options.map((o) => answerRowHTML(
+        o, o.id === current.id ? "correct" : o.id === chosenId ? "wrong" : null)).join("")
+    }</div>`;
+    armRows(el.answer);
+    speakText(current.nameKo, el.answer.querySelector(".answer-row.correct [data-speak]"));
+    revealed();
+  };
+
+  btns.forEach((btn) => {
+    btn.addEventListener("click", (e) => pick(btn, e));
+    btn.addEventListener("keydown", (e) => {
+      if (e.target.closest("[data-speak]")) return;
+      if (e.key === "Enter" || e.key === " ") { e.preventDefault(); pick(btn, e); }
+    });
+  });
+}
+
+/* 첫 문제의 그림은 난도를 고르는 동안 미리 받아 둔다 — 두 무리 모두 */
+preloadImage("famous", upNext("famous"));
+preloadImage("all", upNext("all"));
+
+el.diffScreen.querySelectorAll(".diff-card").forEach((card) => {
+  // 누르기 시작하는 순간(pointerdown)에 소리 컨텍스트를 먼저 깨우고, 손을 떼는 클릭에서 합성기와
+  // 마이크를 깨운다 — 맥 사파리는 합성기가 깨어 있는 상태에서 만든 첫 컨텍스트에 큰 출력 버퍼를
+  // 주므로 컨텍스트가 합성기보다 먼저여야 한다.
+  card.addEventListener("pointerdown", () => wakeAudio());
+  card.addEventListener("click", () => startMode(card.dataset.mode));
+});
+el.modeBar.addEventListener("click", backToDifficulty);
+el.next.addEventListener("click", nextQuestion);
+
+/* 난도 고르는 화면의 각 칸 오른쪽에 오늘·누적 도전수를 두 줄로 적는다 — 꼬리말의 오늘·누적
+   방문과 같은 짝이다. 고르기 전에 어느 난도를 얼마나 해 봤는지 보이는 편이 고르는 데 도움이 된다.
+   문제 화면 맨 위에도 이 칸이 그대로 올라가므로(drawModeCard), 고르기 전과 푸는 중에
+   같은 숫자를 같은 자리에서 보게 된다. 숫자는 js/stats.js 가 받아 온 것을 넘겨받는다 —
+   같은 정보를 두 번 요청하지 않으려고. 통계 서버가 꺼져 있으면 칸은 비어 있고 자리도 없다(css). */
+let modeCounts = null;
+
+function drawModeCounts() {
+  if (!modeCounts || !modeCounts.today || !modeCounts.total) return;
+  const n = (v) => Number(v || 0).toLocaleString("ko-KR");
+  el.diffScreen.querySelectorAll("[data-count]").forEach((box) => {
+    const m = box.dataset.count;
+    box.innerHTML = `<span>오늘 도전 ${n(modeCounts.today[m])}</span>` +
+      `<span>누적 도전 ${n(modeCounts.total[m])}</span>`;
+  });
+}
+
+onStats((s) => {
+  const m = (s || {}).mode;
+  if (!m || !m.today || !m.total) return;
+  modeCounts = m;
+  drawModeCounts();
+  if (mode) drawModeCard();         // 푸는 중이면 위에 얹힌 칸까지 다시 그린다
+});
