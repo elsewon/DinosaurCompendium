@@ -1,0 +1,18 @@
+# macOS
+.DS_Store
+._*
+.Spotlight-V100
+.Trashes
+
+# iCloud 미다운로드 표시 파일
+*.icloud
+
+# 파이썬
+__pycache__/
+*.pyc
+
+# 로컬 미리보기 서버 설정 (Claude 데스크톱 앱)
+.claude/
+
+# wrangler 로컬 상태·캐시 (계정 정보가 들어간다)
+.wrangler/

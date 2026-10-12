@@ -1,0 +1,128 @@
+<!doctype html>
+<html lang="ko">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>공룡 도감 - 이름 맞추기</title>
+  <meta name="description" content="쉬움·보통·어려움 세 가지 난도로 공룡 이름을 맞혀 보세요.">
+  <meta property="og:type" content="website">
+  <meta property="og:site_name" content="공룡 도감">
+  <meta property="og:locale" content="ko_KR">
+  <meta property="og:title" content="공룡 도감 - 이름 맞추기">
+  <meta property="og:description" content="쉬움·보통·어려움 세 가지 난도로 공룡 이름을 맞혀 보세요.">
+  <meta property="og:url" content="https://elsewon.github.io/DinosaurCompendium/quiz.html">
+  <meta property="og:image" content="https://elsewon.github.io/DinosaurCompendium/images/og/site.jpg">
+  <meta property="og:image:width" content="1200">
+  <meta property="og:image:height" content="630">
+  <meta property="og:image:alt" content="티라노사우루스·트리케라톱스·안킬로사우루스 등 공룡들이 모인 그림">
+  <meta name="twitter:card" content="summary_large_image">
+  <link rel="icon" type="image/svg+xml" href="images/favicon.svg">
+  <link rel="stylesheet" href="css/styles.css">
+</head>
+<body>
+  <header class="site-header">
+    <div class="wrap">
+      <a class="brand" href="index.html">
+        <span class="logo" aria-hidden="true">🦖</span>
+        <span>공룡 도감</span>
+      </a>
+      <nav class="nav">
+        <a href="#" data-random title="아무 공룡이나 보여줘!">🎲<span class="nav-label"> 아무 공룡</span></a>
+        <a href="quiz.html" class="active">🧩 이름 맞추기</a>
+        <a href="rank.html">🏆 인기 차트</a>
+      </nav>
+      <a class="sibling" href="https://elsewon.github.io/TeeniepingCompendium/" title="티니핑 도감">
+        <span class="sibling-logo"><img src="https://elsewon.github.io/TeeniepingCompendium/images/favicon.svg" alt=""></span>
+        <span class="sibling-name">티니핑 도감</span>
+      </a>
+    </div>
+  </header>
+
+  <main class="wrap quiz">
+    <h1>이름 맞추기</h1>
+
+    <!-- 난도 선택 화면. 칸 오른쪽 끝(.c)에 오늘·누적 도전수를 js/quiz.js 가 적는다 (통계 서버가 켜져 있을 때) -->
+    <div class="difficulty-screen" id="difficultyScreen">
+      <button class="diff-card" data-mode="easy">
+        <span class="emoji">🍭</span>
+        <span class="txt"><span class="t">쉬움</span><span class="d">유명한 공룡 · 선택지 3개 중에 고르기</span></span>
+        <span class="c" data-count="easy"></span>
+      </button>
+      <button class="diff-card" data-mode="normal">
+        <span class="emoji">🍨</span>
+        <span class="txt"><span class="t">보통</span><span class="d">유명한 공룡</span></span>
+        <span class="c" data-count="normal"></span>
+      </button>
+      <button class="diff-card" data-mode="hard">
+        <span class="emoji">😎</span>
+        <span class="txt"><span class="t">어려움</span><span class="d">모든 공룡</span></span>
+        <span class="c" data-count="hard"></span>
+      </button>
+    </div>
+
+    <!-- 마이크 안내 팝업. 보통·어려움을 고르면 허락 창이 뜨기 전에 난도 화면 위에 뜬다 (js/quiz.js). -->
+    <dialog class="pop" id="micNote" aria-labelledby="micNoteTitle" tabindex="-1">
+      <div class="pop-body">
+        <span class="emoji" aria-hidden="true">🎤</span>
+        <h2 id="micNoteTitle">마이크를 켤게요</h2>
+        <p>마이크를 사용하면 공룡 이름을 말해서 맞출 수 있습니다.
+           마이크를 끄려면 마이크 버튼을 누르거나 페이지를 벗어나면 됩니다.</p>
+        <div class="quiz-btns">
+          <button class="btn btn-ghost" id="micSkip" type="button">싫어요</button>
+          <button class="btn btn-primary" id="micOk" type="button">좋아요</button>
+        </div>
+      </div>
+    </dialog>
+
+    <!-- 읽어 주기 안내 팝업. 쉬움을 고르면 문제 화면으로 넘어가기 전에 난도 화면 위에 뜬다 (js/quiz.js). -->
+    <dialog class="pop" id="speakNote" aria-labelledby="speakNoteTitle" tabindex="-1">
+      <div class="pop-body">
+        <span class="emoji" aria-hidden="true">🔊</span>
+        <h2 id="speakNoteTitle">선택지를 읽어줄게요</h2>
+        <p>문제가 나올 때마다 선택지 3개의 이름을 차례로 읽어 줍니다.
+           아니면 이름 옆 스피커 버튼을 하나하나 눌러서 들을 수 있습니다.</p>
+        <div class="quiz-btns">
+          <button class="btn btn-ghost" id="speakSkip" type="button">싫어요</button>
+          <button class="btn btn-primary" id="speakOk" type="button">좋아요</button>
+        </div>
+      </div>
+    </dialog>
+
+    <!-- 퀴즈 진행 화면 -->
+    <div id="stage" hidden>
+      <!-- 고른 난도를 난도 화면의 그 칸 그대로 보여 준다 (js 가 복제해 넣는다).
+           누르면 난도 고르는 화면으로 돌아간다. -->
+      <div class="mode-bar" id="modeBar"></div>
+
+      <div class="quiz-stage">
+        <div class="quiz-image" id="quizImage"></div>
+        <div id="answerArea"></div>
+        <div class="quiz-btns">
+          <button class="btn btn-primary" id="nextBtn">다음 공룡<svg class="chev" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M9 5l7 7-7 7"/></svg></button>
+        </div>
+      </div>
+    </div>
+  </main>
+
+  <footer class="footer">
+    <p class="stats" id="statsBox" hidden>
+      <a class="stats-link" href="stats.html">방문 통계</a> · <span id="stats"></span>
+    </p>
+    <p><a href="mailto:papa.dino@icloud.com">papa.dino@icloud.com</a> · 2026 · 딸에게 보여 주려고 만든 공룡 도감입니다. 광고나 후원 등 어떤 형태의 수익화도 하지 않습니다.</p>
+    <p>공룡 그림: <a href="https://commons.wikimedia.org/wiki/User:TotalDino" rel="noopener" target="_blank">TotalDino</a>
+       (<a href="https://commons.wikimedia.org/wiki/Category:Dinosauria_paleo-illustrations_by_TotalDino" rel="noopener" target="_blank">위키미디어 공용</a>)
+       — 그림마다 라이선스(CC BY 4.0 · CC BY-SA 4.0 · CC0)가 달라 공룡마다 페이지에 적었습니다.</p>
+    <p>자료: <a href="https://www.wikidata.org" rel="noopener" target="_blank">위키데이터</a> (CC0) ·
+       <a href="https://en.wikipedia.org" rel="noopener" target="_blank">영어 위키백과</a>
+       (<a href="https://creativecommons.org/licenses/by-sa/4.0/deed.ko" rel="noopener" target="_blank">CC BY-SA 4.0</a>) ·
+       <a href="https://paleobiodb.org" rel="noopener" target="_blank">The Paleobiology Database</a>
+       (<a href="https://creativecommons.org/licenses/by/4.0/deed.ko" rel="noopener" target="_blank">CC BY 4.0</a>)</p>
+  </footer>
+
+  <script src="data/dinosaurs.js"></script>
+  <script src="js/util.js"></script>
+  <script src="js/stats.js"></script>
+  <script src="js/hear.js"></script>
+  <script src="js/quiz.js"></script>
+</body>
+</html>

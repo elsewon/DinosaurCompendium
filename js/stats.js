@@ -1,0 +1,162 @@
+/* ===== 방문 통계 =====
+ *
+ * 티니핑 도감의 js/stats.js 를 옮겼다.
+ *
+ * GitHub Pages 에는 서버가 없어 방문을 셀 수 없다. 세는 일은 Cloudflare Worker
+ * (worker/counter.js) 가 맡고, 여기서는 그 주소로 요청을 보내 숫자를 받아 온다.
+ *
+ * 목록 · 이름 맞추기 · 인기 차트 · 개별 공룡을 **서로 독립적으로** 센다. 목록의 방문 수는
+ * 목록에 들어온 횟수이지 사이트 전체 합계가 아니다.
+ *
+ * 방문은 모두 세션(탭) 단위다. 목록·퀴즈·순위는 영역마다 한 번, 개별 공룡은
+ * 공룡마다 한 번 센다 — 같은 세션에서 티라노사우루스를 두 번 열어도 1, 티라노사우루스와
+ * 트리케라톱스를 하나씩 열면 2 가 된다.
+ *
+ * 공유는 세지 않는다. 셀 수 있는 것이 사이트의 공유 버튼을 거친 것뿐이라 실제 공유의
+ * 하한값인데 얼마나 모자란지도 알 길이 없었다(티니핑 도감에서 세다가 뺐다). 그 공유 버튼도
+ * 없앴다 — 상단 바의 그 자리에는 이제 티니핑 도감으로 가는 링크가 있다.
+ *
+ * 브라우저에 남기는 표시는 모두 dino- 로 시작한다. GitHub Pages 에 올리면 티니핑 도감과
+ * 같은 출처(https://<계정>.github.io)라 sessionStorage·localStorage 를 함께 쓰게 되는데,
+ * 티니핑 도감은 ping- 을 쓴다 — 겹치면 한쪽에서 센 것이 다른 쪽을 막는다.
+ *
+ * 아래 STATS_API 가 비어 있으면 아무 요청도 보내지 않고 통계 줄도 나타나지 않는다.
+ * 인기 차트·통계 페이지도 이 값을 쓴다(js/rank.js · js/chart.js). Worker 를 배포한 뒤
+ * 그 주소를 넣으면 켜진다. (README 의 "방문·좋아요 통계" 참고)
+ */
+const STATS_API = "https://dinosaur-counter.elsewon.workers.dev";
+
+/* 지금 페이지가 어느 영역인지 — currentDinoId 는 js/util.js 에 있다 */
+const dinoId = typeof currentDinoId === "function" ? currentDinoId() : null;
+const SCOPE = dinoId ? "page"
+  : /quiz\.html$/.test(location.pathname) ? "quiz"
+  : /rank\.html$/.test(location.pathname) ? "rank"
+  : /stats\.html$/.test(location.pathname) ? null   // 통계 페이지 자체는 세지 않는다
+  : "list";
+const PAGE_PARAM = dinoId ? "&page=" + encodeURIComponent(dinoId) : "";
+
+function renderStats(s) {
+  if (!s) return;
+  const n = (v) => Number(v || 0).toLocaleString("ko-KR");
+
+  /* 개별 공룡 페이지는 꼬리말에 적지 않는다. 조회수는 카드 아래 띠의
+     좋아요 위에 붙는다 — 같은 성격의 숫자를 한자리에 모아 두는 편이 읽기 쉽고,
+     꼬리말에 또 적으면 같은 말을 두 번 하는 꼴이다. */
+  if (SCOPE === "page") {
+    const slot = document.querySelector("[data-view]");
+    if (slot) {
+      slot.textContent = n((s.page || {}).visit);
+      slot.closest(".view-bar").hidden = false;   // 숫자가 온 뒤에야 띠를 드러낸다
+    }
+    return;
+  }
+
+  const box = document.getElementById("stats");
+  const wrap = document.getElementById("statsBox");
+  if (!box) return;
+  const c = s[SCOPE] || {};
+  box.textContent = `오늘 방문 ${n(c.visitToday)} · 누적 방문 ${n(c.visitTotal)}`;
+  if (wrap) wrap.hidden = false;
+}
+
+/* 받아 온 숫자를 다른 화면도 쓸 수 있게 알린다 (이름 맞추기의 난도별 도전수,
+   개별 공룡의 좋아요 수). 요청을 두 번 보내지 않으려고 이벤트로 넘긴다.
+
+   신호는 받는 쪽이 붙기 전에 지나갈 수 있다. 이 파일이 먼저 내려와 요청을 보내고
+   받는 쪽(js/quiz.js · js/page.js)은 그 뒤에 내려오는데, 그 사이에 응답이 오면
+   아직 아무도 듣고 있지 않다. 그래서 마지막 값을 들고 있다가 늦게 온 쪽에 건넨다. */
+let latestStats = null;
+
+function publish(s) {
+  if (!s) return;
+  latestStats = s;
+  document.dispatchEvent(new CustomEvent("dino:stats", { detail: s }));
+}
+
+/* 숫자를 쓰는 쪽은 addEventListener 대신 이것을 부른다 — 이미 지나간 값이 있으면
+   그 자리에서 한 번 주고, 그다음부터는 새 값이 올 때마다 준다. */
+function onStats(fn) {
+  document.addEventListener("dino:stats", (e) => fn(e.detail));
+  if (latestStats) fn(latestStats);
+}
+
+async function callStats(path, options) {
+  if (!STATS_API) return null;
+  try {
+    const res = await fetch(STATS_API + path,
+      { ...options, mode: "cors", cache: "no-store", signal: timeoutSignal(STATS_TIMEOUT) });
+    return res.ok ? await res.json() : null;
+  } catch {
+    return null;   // 통계는 부가 기능이라 실패해도 사이트는 그대로 동작한다
+  }
+}
+
+/* 세션(탭) 안에서 이미 셌는지. 개별 공룡은 마리마다 따로 표시를 남긴다. */
+function alreadyVisited() {
+  if (!SCOPE) return true;
+  const key = SCOPE === "page" ? "dino-visited-page-" + dinoId : "dino-visited-" + SCOPE;
+  try {
+    const seen = sessionStorage.getItem(key) === "1";
+    sessionStorage.setItem(key, "1");
+    return seen;
+  } catch {
+    return false;   // 사파리 비공개 모드 등에서 막히면 그냥 센다
+  }
+}
+
+/* ===== 방문 경로 =====
+   어디를 거쳐 들어왔는지 한 세션에 한 번만, 리퍼러의 주소(호스트)로 센다.
+
+   사이트 안에서 넘어온 것은 세지 않는다 — 밖에서 들어온 것만 방문 경로다. 같은 주소(github.io)에
+   있는 티니핑 도감에서 넘어온 것도 여기서는 안으로 친다(상단 바의 티니핑 도감 링크로 오가는 것도).
+
+   리퍼러가 없으면(앱·북마크·주소 입력, 리퍼러를 보내지 않는 카카오톡 같은 인앱 브라우저)
+   세지 않는다 — 어디서 왔는지 알려 주는 것이 없어 목록에 쓸 데가 없다.
+
+   공유 버튼이 있던 때는 그 버튼이 링크에 붙인 ?s=1 표식으로, 리퍼러 없이 들어온 공유 링크를
+   「공유 링크」 로 따로 셌다. 버튼과 함께 없앴다 — 옛 링크에 표식이 남아 있어도 읽지 않는다. */
+function referralHost() {
+  const r = document.referrer;
+  if (!r) return null;
+  try {
+    const host = new URL(r).host.toLowerCase().replace(/^www\./, "");
+    const self = location.host.toLowerCase().replace(/^www\./, "");
+    return host === self ? null : host;      // 안에서 온 것이면 세지 않는다
+  } catch {
+    return null;                              // 주소가 망가졌으면 어디서 왔는지 모른다
+  }
+}
+
+async function countReferral() {
+  let counted = false;
+  try {
+    counted = sessionStorage.getItem("dino-referral") === "1";
+    sessionStorage.setItem("dino-referral", "1");
+  } catch { /* 저장소가 막히면 매번 센다 */ }
+  const host = referralHost();
+  // 세션 표시는 셀 것이 없어도 남겨 둔다 — "한 세션에 한 번" 이라는 규칙은 그대로다
+  if (counted || !host) return;
+  await callStats("/hit?type=ref&host=" + encodeURIComponent(host), { method: "POST" });
+}
+
+async function countVisit() {
+  if (!SCOPE) return;            // 통계 페이지는 세지도 보여 주지도 않는다
+  const stats = alreadyVisited()
+    ? await callStats("/stats" + (PAGE_PARAM ? "?" + PAGE_PARAM.slice(1) : ""))
+    : await callStats(`/hit?type=visit&scope=${SCOPE}${PAGE_PARAM}`, { method: "POST" });
+  renderStats(stats);
+  publish(stats);
+}
+
+/* 퀴즈에서 정답이 공개될 때마다 js/quiz.js 가 이 신호를 보낸다 (난도별 도전수) */
+document.addEventListener("dino:quiz", async (e) => {
+  const mode = e.detail && e.detail.mode;
+  if (!mode) return;
+  const s = await callStats("/hit?type=mode&mode=" + encodeURIComponent(mode),
+                            { method: "POST" });
+  renderStats(s);
+  publish(s);
+});
+
+countVisit();
+countReferral();
