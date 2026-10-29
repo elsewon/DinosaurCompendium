@@ -174,10 +174,11 @@ const SPEAK_ICON =
 const escAttr = (s) => String(s || "")
   .replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;");
 
-/* 이름 읽어 주기 버튼 */
-function speakBtnHTML(name, cls) {
+/* 이름 읽어 주기 버튼. said 를 주면 이름 대신 그 글을 읽는다 — 인기 차트가 이름 앞에 순위를
+   붙인다(js/rank.js). 버튼 이름(aria-label)은 그대로 이름이다. */
+function speakBtnHTML(name, cls, said) {
   const n = escAttr(name);
-  return `<button class="speak-btn${cls ? " " + cls : ""}" type="button" data-speak="${n}"` +
+  return `<button class="speak-btn${cls ? " " + cls : ""}" type="button" data-speak="${said ? escAttr(said) : n}"` +
     ` aria-label="${n} 이름 듣기" title="이름 듣기">${SPEAK_ICON}</button>`;
 }
 
@@ -189,6 +190,13 @@ function speakBlockBtnHTML(label) {
     ` aria-label="${l}" title="${l}">${SPEAK_ICON}</button>`;
 }
 
+/* 목록을 차례로 읽어 주는 버튼 (인기 차트의 순위 제목 옆). data-speak 를 달지 않는다 — 달면 아래
+   처리기가 먼저 받아 제목 글을 읽어 버린다. 무엇을 읽을지는 부르는 쪽이 정해 speakSeries 에 넘긴다. */
+function speakListBtnHTML(label) {
+  const l = escAttr(label || "차례로 읽어 주기");
+  return `<button class="speak-btn" type="button" aria-label="${l}" title="${l}">${SPEAK_ICON}</button>`;
+}
+
 /* 읽어 주기.
    - 읽는 중에 같은 버튼을 누르면 멈춘다.
    - 읽는 중에 다른 버튼을 누르면 읽던 것을 멈추고 새 글을 읽는다.
@@ -198,12 +206,15 @@ let speakingBtn = null;
 let speakSeq = 0;
 let seriesId = 0;               // 이어 읽기 한 벌을 가리키는 표
 let seriesTimer = null;
+let seriesBtn = null;           // 이어 읽기를 켠 버튼 — 다 읽을 때까지 뛴다 (speakSeries)
 
 function stopSpeaking() {
   speakSeq++;                     // 이 뒤에 오는 옛 신호는 모두 무시한다
   seriesId++;                     // 이어 읽기도 여기서 끊는다
   clearTimeout(seriesTimer);
   seriesTimer = null;
+  if (seriesBtn) seriesBtn.classList.remove("speaking");
+  seriesBtn = null;
   if (speakingBtn) speakingBtn.classList.remove("speaking");
   speakingBtn = null;
   try { window.speechSynthesis.cancel(); } catch { /* 못 멈춰도 표시는 되돌린다 */ }
@@ -283,23 +294,34 @@ function primeSpeech() {
   } catch { /* 못 깨워도 버튼 누르기는 그대로 된다 */ }
 }
 
-/* 이름 여럿을 텀을 두고 차례로 읽는다 (이름 맞추기의 선택지 셋).
+/* 이름 여럿을 텀을 두고 차례로 읽는다 (이름 맞추기의 선택지 셋, 인기 차트의 순위 목록).
    items 는 { text, btn } 목록 — btn 을 주면 읽는 동안 그 버튼이 펄스로 뛴다.
-   쉬는 참이 있어야 아이가 방금 들은 이름을 그림과 맞춰 볼 틈이 생긴다. */
-function speakSeries(items, gap = 500) {
+   쉬는 참이 있어야 아이가 방금 들은 이름을 그림과 맞춰 볼 틈이 생긴다.
+   btn 은 이어 읽기를 켠 버튼이다 (인기 차트의 순위 제목 옆). 마지막 이름을 다 읽을 때까지 뛰고,
+   그동안 다시 누르면 멈춘다 — speakText 의 "같은 버튼 = 멈추기" 와 같다. 그래서 마지막 이름이
+   끝나면 텀을 더 두지 않고 곧바로 끝낸다 — 그 텀 동안 버튼이 더 뛰면, 다 읽은 줄 알고 다시 누른
+   손이 처음부터 듣는 대신 멈추기를 누르게 된다(티니핑 도감과 같다). */
+function speakSeries(items, btn, gap = 500) {
   const list = (items || []).filter((it) => it && it.text);
   if (!window.speechSynthesis || !list.length) return;
+  const again = btn != null && btn === seriesBtn;
   stopSpeaking();
+  if (again) return;              // 같은 버튼을 다시 누른 것 = 멈추기
   primeSpeech();                  // 흐름 안에서 미리 깨워 둔다 (iOS)
   const id = seriesId;            // stopSpeaking 이 올려 둔 이번 벌의 표
+  seriesBtn = btn || null;
+  if (seriesBtn) seriesBtn.classList.add("speaking");
   let i = 0;
   const step = () => {
     if (id !== seriesId) return;                            // 그새 멈췄다
-    if (i >= list.length) { seriesTimer = null; return; }   // 다 읽었다 — 이어 읽기가 끝났다는 표시
     const it = list[i++];
     speakOne(it.text, it.btn, () => {
       if (id !== seriesId) return;
-      seriesTimer = setTimeout(step, gap);
+      if (i < list.length) { seriesTimer = setTimeout(step, gap); return; }
+      // 다 읽었다 — 이어 읽기가 끝났다는 표시
+      seriesTimer = null;
+      if (seriesBtn) seriesBtn.classList.remove("speaking");
+      seriesBtn = null;
     });
   };
   seriesTimer = setTimeout(step, gap);
